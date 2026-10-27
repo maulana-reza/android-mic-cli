@@ -6,7 +6,7 @@ HP, lalu PC memutarnya ke output device. Contohnya `CABLE Input` dari VB-Cable, 
 sebagai mic di Zoom atau Discord.
 
 Yang dibutuhkan:
-- Di laptop: Python 3.11+ dengan `numpy` dan `sounddevice` (`python -m pip install -r requirements.txt`).
+- Di laptop: Python 3.11+ dengan `numpy`, `sounddevice`, `pystray`, dan `pillow` (`python -m pip install -r requirements.txt`).
 - Di HP: app **AndroidMic** versi 2.2.x (APK) sebagai pengirim suara.
 - Tanpa adb dan tanpa kabel.
 
@@ -46,6 +46,30 @@ Untuk sekali jalan saja (tidak disimpan) bisa pakai flag: `-m tcp|udp`, `-i IP`,
 
 `mode`, `ip`, `port`, `device`, dan `latency` otomatis disimpan ke `config.toml` di folder ini.
 File itu juga bisa diedit manual.
+
+## Ikon tray
+
+Selama berjalan, ada ikon mic di area notifikasi taskbar (di dalam "hidden icons" ^ kalau tidak
+di-pin). Warnanya menunjukkan status:
+
+- abu-abu = `STOPPED`
+- oranye = `LISTENING`, menunggu HP connect
+- hijau = `CONNECTED`
+
+**Klik kiri** ikon untuk menyalakan/mematikan (toggle) listener. Klik kanan untuk menu: **Active**
+(centang = menyala, klik untuk toggle) dan **Quit**. Arahkan kursor ke ikon untuk melihat alamatnya.
+Supaya selalu terlihat, seret ikon dari "hidden icons" ke taskbar. Matikan dengan `--no-tray`.
+
+## Auto start saat login
+
+Jalankan dengan `pythonw.exe` (tanpa jendela terminal) lewat shortcut di folder Startup Windows
+(`Win+R` → `shell:startup`):
+
+- **Target**: `pythonw.exe "<folder ini>\android_mic_cli.py"`
+- **Start in**: folder ini
+
+Tanpa terminal, kontrolnya lewat ikon tray saja, dan log ditulis ke `android-mic.log` di folder ini.
+Untuk mematikan auto start, hapus shortcut-nya dari folder Startup.
 
 ## Arti status
 
