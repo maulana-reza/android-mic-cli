@@ -2,3 +2,15 @@
 config.toml
 android-mic.log
 __pycache__/
+# build.bat
+.venv/
+build/
+dist/
+# android/
+.gradle/
+.kotlin/
+.idea/
+*.iml
+local.properties
+keystore.properties
+*.jks

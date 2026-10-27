@@ -1,17 +1,22 @@
-"""android-mic-cli: the PC side of AndroidMic in a terminal, standalone.
+"""android-mic-cli: the PC side of AndroidMic in a terminal, standalone, plus the Mirror app's screen in a window.
 
 No AndroidMic desktop app needed, this script replaces it. The phone runs the AndroidMic
-Android app 2.2.x and connects over its hotspot (or any Wi-Fi), no adb.
+Android app 2.2.x, or the Mirror app from this project, and connects over its hotspot (or any Wi-Fi), no adb.
 - TCP (phone mode WIFI): handshake "AndroidMic1" -> "AndroidMic2", then frames of
   4-byte big-endian length + protobuf AudioPacketMessage.
+- TCP, Mirror app: handshake "MirrorHello" -> "MirrorReady", then the same length-prefixed frames,
+  each [type][data]: 2 = 44100 Hz mono 16-bit mic, 0/1 = H.264 for the screen window (1 = key frame).
+  Frames back to the phone carry the window's input as JSON.
 - UDP (phone mode UDP): datagrams with the same length prefix + MessageWrapper
   (connect request, or audio packet with a sequence number).
-Settings are kept in config.toml next to this script.
+Settings are kept in config.toml next to this script, or next to Mirror.exe when installed.
 """
 import argparse
 import collections
 import contextlib
+import ctypes
 import errno
+import fractions
 import ipaddress
 import json
 import os
@@ -26,10 +31,21 @@ import tomllib
 import numpy as np
 import sounddevice as sd
 
-CONFIG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.toml")
-LOGFILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "android-mic.log")
+try:
+    import sdl2dll  # sets PYSDL2_DLL_PATH first, so importing sdl2 doesn't warn about where its DLL came from
+    import av
+    import sdl2
+except ImportError:  # no screen window, the mic still plays
+    sdl2 = None
+
+HERE = os.path.dirname(sys.executable if getattr(sys, "frozen", False) else os.path.abspath(__file__))  # frozen: Mirror.exe
+CONFIG = os.path.join(HERE, "config.toml")
+LOGFILE = os.path.join(HERE, "android-mic.log")
 DEFAULTS = {"mode": "tcp", "ip": "auto", "port": 54345, "device": "default", "latency_ms": 30}
 CHECK_1, CHECK_2 = b"AndroidMic1", b"AndroidMic2"
+MIRROR_1, MIRROR_2 = b"MirrorHello", b"MirrorReady"  # same length as AndroidMic's, one tcp port serves both
+MAX_PACKET = 8 << 20  # a key frame fits easily, a garbage length can't make us allocate gigabytes
+SCROLL = 0.25  # fraction of the phone screen scrolled per mouse wheel notch
 PHONE_MODE = {"tcp": "WIFI", "udp": "UDP"}
 # Android AudioFormat encoding -> (name, dtype, scale, offset)
 FORMATS = {
@@ -183,13 +199,231 @@ class Player:
         self.underruns = self.dropped = 0
 
 
+def clamp(v):
+    return min(1.0, max(0.0, v))
+
+
+class Screen:
+    """The Mirror app's screen in a window, decoded by FFmpeg and drawn by SDL2 like scrcpy, the window's
+    clicks and keys back to the phone. One thread owns the window, the decoder and every SDL call.
+    While the window is closed or minimized the video is dropped, nothing gets decoded."""
+
+    def __init__(self):
+        if sdl2 is None:
+            raise ImportError("needs av, pysdl2 and pysdl2-dll: python -m pip install -r requirements.txt")
+        self.phone = None  # send(msg) to the connected Mirror phone
+        self.packets = collections.deque()
+        self.showing = False  # window open and not minimized, video() drops packets otherwise
+        self.want = threading.Event()  # open the window, or bring it to the front
+        self.window = self.renderer = self.texture = self.decoder = self.stroke = None
+        self.title, self.size, self.mouse, self.wheel_at, self.error = "Mirror", (720, 1600), (0, 0), 0, None
+        self.keys = {sdl2.SDLK_BACKSPACE: "del", sdl2.SDLK_RETURN: "enter", sdl2.SDLK_KP_ENTER: "enter",
+                     sdl2.SDLK_ESCAPE: "back"}
+        self.alt_keys = {sdl2.SDLK_b: "back", sdl2.SDLK_h: "home", sdl2.SDLK_s: "recents"}  # as in scrcpy
+        ready = threading.Event()
+        threading.Thread(target=self.run, args=(ready,), daemon=True).start()
+        ready.wait()
+        if self.error:
+            raise RuntimeError(self.error)
+
+    def run(self, ready):
+        for hint, value in ((sdl2.SDL_HINT_WINDOWS_DPI_AWARENESS, b"permonitorv2"),  # sharp on scaled displays
+                            (sdl2.SDL_HINT_RENDER_SCALE_QUALITY, b"linear"),
+                            (sdl2.SDL_HINT_QUIT_ON_LAST_WINDOW_CLOSE, b"0"),  # closing the window only closes it
+                            (sdl2.SDL_HINT_NO_SIGNAL_HANDLERS, b"1"),  # Ctrl+C stays with Python
+                            (sdl2.SDL_HINT_FORCE_RAISEWINDOW, b"1")):  # in front when the phone connects
+            sdl2.SDL_SetHint(hint, value)
+        if sdl2.SDL_Init(sdl2.SDL_INIT_VIDEO):
+            self.error = sdl2.SDL_GetError().decode()
+        self.wake = sdl2.SDL_RegisterEvents(1)
+        ready.set()
+        event = sdl2.SDL_Event()
+        while not self.error:
+            if not self.window:
+                self.want.wait()  # nothing to do until a phone connects or the tray asks
+            if self.want.is_set():
+                self.want.clear()
+                self.open()
+            if self.window and sdl2.SDL_WaitEvent(event):
+                try:
+                    self.handle(event)
+                except Exception as e:  # one bad frame or event must not end the window's thread
+                    log(f"Screen: {e}")
+
+    def open(self):
+        if self.window:
+            if sdl2.SDL_GetWindowFlags(self.window) & sdl2.SDL_WINDOW_MINIMIZED:
+                sdl2.SDL_RestoreWindow(self.window)
+            return sdl2.SDL_RaiseWindow(self.window)
+        w, h = self.fit(*self.size)
+        self.window = sdl2.SDL_CreateWindow(self.title.encode(), sdl2.SDL_WINDOWPOS_CENTERED,
+                                            sdl2.SDL_WINDOWPOS_CENTERED, w, h, sdl2.SDL_WINDOW_RESIZABLE)
+        if not self.window:
+            return log(f"Screen: {sdl2.SDL_GetError().decode()}")
+        self.renderer = sdl2.SDL_CreateRenderer(self.window, -1, 0)
+        self.decoder = av.CodecContext.create("h264", "r")
+        self.decoder.flags |= av.codec.context.Flags.low_delay  # each packet out as a frame right away
+        self.shown_title = self.title
+        sdl2.SDL_RaiseWindow(self.window)
+        self.resume()
+
+    def resume(self):
+        """Take video again, starting at a fresh key frame."""
+        self.packets.clear()
+        self.need_key = self.showing = True
+        self.to_phone(b'{"t":"sync"}')  # the key frame now, not at the next interval
+
+    def close(self):
+        self.showing = False
+        sdl2.SDL_DestroyRenderer(self.renderer)  # frees the texture too
+        sdl2.SDL_DestroyWindow(self.window)
+        self.window = self.renderer = self.texture = self.decoder = self.stroke = None
+
+    def fit(self, w, h):
+        """Window size for a w x h video: what fits in 90% of the screen, never enlarged."""
+        r = sdl2.SDL_Rect()
+        sdl2.SDL_GetDisplayUsableBounds(sdl2.SDL_GetWindowDisplayIndex(self.window) if self.window else 0, r)
+        s = min(1, r.w * 0.9 / w, r.h * 0.9 / h)
+        return int(w * s), int(h * s)
+
+    def handle(self, e):
+        if e.type == self.wake:
+            if self.title != self.shown_title:
+                self.shown_title = self.title
+                sdl2.SDL_SetWindowTitle(self.window, self.title.encode())
+            self.drain()
+        elif e.type == sdl2.SDL_WINDOWEVENT:
+            what = e.window.event
+            if what == sdl2.SDL_WINDOWEVENT_CLOSE:
+                self.close()
+            elif what == sdl2.SDL_WINDOWEVENT_MINIMIZED:
+                self.showing = False
+            elif what == sdl2.SDL_WINDOWEVENT_RESTORED and not self.showing:
+                self.resume()
+            elif what in (sdl2.SDL_WINDOWEVENT_EXPOSED, sdl2.SDL_WINDOWEVENT_SIZE_CHANGED):
+                self.draw()
+        elif e.type == sdl2.SDL_MOUSEBUTTONDOWN:
+            b = e.button
+            if b.button == sdl2.SDL_BUTTON_LEFT:
+                self.stroke, self.stroke_at = [self.pos(b.x, b.y)], b.timestamp
+            elif b.button in (sdl2.SDL_BUTTON_RIGHT, sdl2.SDL_BUTTON_MIDDLE):
+                self.send(t="key", k="back" if b.button == sdl2.SDL_BUTTON_RIGHT else "home")
+        elif e.type == sdl2.SDL_MOUSEMOTION:
+            self.mouse = (e.motion.x, e.motion.y)
+            if self.stroke and (p := self.pos(*self.mouse)) != self.stroke[-1]:
+                self.stroke.append(p)
+        elif e.type == sdl2.SDL_MOUSEBUTTONUP and e.button.button == sdl2.SDL_BUTTON_LEFT and self.stroke:
+            # the phone replays the whole stroke on release, with its duration: tap, long press or swipe
+            self.stroke.append(self.pos(e.button.x, e.button.y))
+            self.send(t="gesture", pts=self.stroke, ms=max(1, e.button.timestamp - self.stroke_at))
+            self.stroke = None
+        elif e.type == sdl2.SDL_MOUSEWHEEL and e.wheel.y and e.wheel.timestamp - self.wheel_at >= 250:
+            self.wheel_at = e.wheel.timestamp
+            x, y = self.pos(*self.mouse)
+            up = (e.wheel.y > 0) != (e.wheel.direction == sdl2.SDL_MOUSEWHEEL_FLIPPED)
+            self.send(t="gesture", pts=[[x, y], [x, clamp(y + SCROLL if up else y - SCROLL)]], ms=150)
+        elif e.type == sdl2.SDL_KEYDOWN:
+            key, mod = e.key.keysym.sym, e.key.keysym.mod
+            if mod & sdl2.KMOD_CTRL and key == sdl2.SDLK_v:
+                if text := (sdl2.SDL_GetClipboardText() or b"").decode(errors="replace"):
+                    self.send(t="text", s=text)
+            elif name := (self.alt_keys if mod & sdl2.KMOD_LALT else self.keys).get(key):
+                self.send(t="key", k=name)
+        elif e.type == sdl2.SDL_TEXTINPUT:
+            self.send(t="text", s=e.text.text.decode(errors="replace"))
+
+    def drain(self):
+        """Decode what arrived, draw the newest frame."""
+        frame = None
+        while self.showing and self.packets:
+            packet = self.packets.popleft()
+            if self.need_key and packet[0] != 1:
+                continue  # a picture can only start at a key frame
+            self.need_key = False
+            try:
+                for frame in self.decoder.decode(av.Packet(packet[1:])):
+                    pass
+            except av.FFmpegError as e:
+                log(f"Screen: {e}, waiting for a key frame")
+                return self.resume()
+        if frame:
+            self.draw(frame)
+
+    def draw(self, frame=None):
+        if frame:
+            if frame.format.name not in ("yuv420p", "yuvj420p"):
+                frame = frame.reformat(format="yuv420p")
+            if (frame.width, frame.height) != self.size or not self.texture:
+                self.new_texture(frame.width, frame.height)
+            # as the encoder tagged it: full range, BT.709, or else BT.601
+            sdl2.SDL_SetYUVConversionMode(sdl2.surface.SDL_YUV_CONVERSION_JPEG if frame.color_range == 2 else
+                                          sdl2.surface.SDL_YUV_CONVERSION_BT709 if frame.colorspace == 1 else
+                                          sdl2.surface.SDL_YUV_CONVERSION_BT601)
+            y, u, v = ((ctypes.cast(p.buffer_ptr, ctypes.POINTER(ctypes.c_ubyte)), p.line_size) for p in frame.planes)
+            sdl2.SDL_UpdateYUVTexture(self.texture, None, *y, *u, *v)
+        sdl2.SDL_RenderClear(self.renderer)
+        if self.texture:
+            sdl2.SDL_RenderCopy(self.renderer, self.texture, None, None)
+        sdl2.SDL_RenderPresent(self.renderer)
+
+    def new_texture(self, w, h):
+        if self.texture:
+            sdl2.SDL_DestroyTexture(self.texture)
+        self.texture = sdl2.SDL_CreateTexture(self.renderer, sdl2.SDL_PIXELFORMAT_IYUV,
+                                              sdl2.SDL_TEXTUREACCESS_STREAMING, w, h)
+        sdl2.SDL_RenderSetLogicalSize(self.renderer, w, h)  # letterboxed, and mouse events come in video pixels
+        if (w, h) != self.size:  # the phone rotated: the window takes the new shape
+            self.size = (w, h)
+            sdl2.SDL_SetWindowSize(self.window, *self.fit(w, h))
+
+    def pos(self, x, y):
+        """Point in video pixels -> 0..1 on the phone screen."""
+        return [round(clamp(x / self.size[0]), 4), round(clamp(y / self.size[1]), 4)]
+
+    def send(self, **msg):
+        self.to_phone(json.dumps(msg, separators=(",", ":")).encode())
+
+    def to_phone(self, msg):
+        if send := self.phone:
+            with contextlib.suppress(OSError):  # the phone just left
+                send(msg)
+
+    def attach(self, conn):
+        """A Mirror phone connected: its screen comes up, the window's input goes to it."""
+        self.phone = lambda msg: conn.sendall(len(msg).to_bytes(4, "big") + msg)  # only the screen thread writes
+        self.title = f"Mirror - {conn.getpeername()[0]}"
+        self.show()
+
+    def detach(self):
+        self.phone = None
+        self.title = "Mirror - disconnected"
+        self.poke()
+
+    def show(self):
+        """Open the window, or bring it to the front."""
+        self.want.set()
+        self.poke()
+
+    def video(self, packet):
+        if self.showing:
+            self.packets.append(packet)
+            self.poke()
+
+    def poke(self):
+        """Wake the screen thread, SDL_PushEvent is thread safe."""
+        e = sdl2.SDL_Event()
+        e.type = self.wake
+        sdl2.SDL_PushEvent(e)
+
+
 class Receiver:
     """Listener and connection state, driven by the start/stop commands."""
 
-    def __init__(self, player, mode, ip, port):
+    def __init__(self, player, mode, ip, port, screen=None):
         self.player, self.mode, self.ip, self.port = player, mode, ip, port  # ip "auto" = IP on the hotspot
+        self.screen = screen  # None: the Mirror app's mic still plays, its video is dropped
         self.sock = self.conn = self.thread = None
-        self.host = ""
+        self.host = self.address = ""  # address = ip:port for the phone
         self.stopping = threading.Event()
         self.state, self.where, self.fmt, self.t0 = "STOPPED", "", "", None
 
@@ -227,7 +461,9 @@ class Receiver:
 
     def hint(self):
         ip = primary_ip() if self.host == "0.0.0.0" else self.host
-        log(f"On the phone: mode {PHONE_MODE[self.mode]}, IP {ip}, port {self.port}, then tap Connect")
+        self.address = f"{ip}:{self.port}"
+        mirror = f"Mirror app {self.address} then Sambung, or " if self.mode == "tcp" else ""
+        log(f"On the phone: {mirror}AndroidMic mode {PHONE_MODE[self.mode]}, IP {ip}, port {self.port}, then tap Connect")
 
     def listening(self):
         self.state, self.where, self.fmt, self.t0 = "LISTENING", f"{self.host}:{self.port} ({self.mode})", "", None
@@ -235,13 +471,22 @@ class Receiver:
         if self.ip == "auto" and (now := primary_ip()) != self.host:
             log(f"This PC's IP changed to {now} (hotspot restarted?), type start to listen there")
 
-    def connected(self, addr, handshake_ms=None):
+    def connected(self, addr, handshake_ms=None, app="AndroidMic"):
         self.state, self.where, self.t0 = "CONNECTED", f"{addr[0]}:{addr[1]}", time.perf_counter()
         self.player.reset_stats()
-        log(f"Connected on {self.where}" + (f" (handshake {handshake_ms:.0f} ms)" if handshake_ms is not None else ""))
+        log(f"Connected on {self.where}, {app}" + (f" (handshake {handshake_ms:.0f} ms)" if handshake_ms is not None else ""))
 
     def audio(self, msg):
-        rate, ch, fmt, x = decode_audio(msg)
+        self.play(*decode_audio(msg))
+
+    def mirror(self, packet):
+        """[type][data] from the Mirror app: 2 = 44100 Hz mono 16-bit mic, else H.264 for the screen page."""
+        if packet[0] == 2:
+            self.play(44100, 1, "i16", (np.frombuffer(packet, "<i2", offset=1).astype(np.float32) / 32768).reshape(-1, 1))
+        elif self.screen:
+            self.screen.video(packet)
+
+    def play(self, rate, ch, fmt, x):
         if self.t0 is not None:
             self.fmt = f"{rate} Hz {'mono' if ch == 1 else 'stereo'} {fmt}"
             ms = (time.perf_counter() - self.t0) * 1000
@@ -274,17 +519,26 @@ class Receiver:
         with conn, conn.makefile("rb") as f:  # the socket only really closes once f is closed too
             try:
                 t0 = time.perf_counter()
-                if (hello := f.read(len(CHECK_1))) != CHECK_1:
+                if (hello := f.read(len(CHECK_1))) not in (CHECK_1, MIRROR_1):
                     raise ValueError(f"bad handshake {hello!r}")
-                conn.sendall(CHECK_2)
+                mirror = hello == MIRROR_1
+                conn.sendall(MIRROR_2 if mirror else CHECK_2)
                 self.conn = conn
-                self.connected(addr, (time.perf_counter() - t0) * 1000)
+                self.connected(addr, (time.perf_counter() - t0) * 1000, "Mirror app" if mirror else "AndroidMic")
                 conn.settimeout(5)  # a phone that vanished without closing (hotspot off)
+                if mirror and self.screen:
+                    self.screen.attach(conn)
+                handle = self.mirror if mirror else self.audio
                 while len(head := f.read(4)) == 4:
-                    self.audio(f.read(int.from_bytes(head, "big")))
+                    if (n := int.from_bytes(head, "big")) > MAX_PACKET:
+                        raise ValueError(f"{n} byte packet, not a phone")
+                    handle(f.read(n))
                 reason = "phone closed the connection"
             except Exception as e:  # a broken session ends here, the listener keeps going
                 reason = str(e) or type(e).__name__
+            finally:
+                if self.screen:
+                    self.screen.detach()
         if self.conn is None:
             return log(f"Rejected {addr[0]}:{addr[1]}: {reason}")
         self.conn = None
@@ -451,9 +705,10 @@ def tray_image(color):
     return img
 
 
-def tray(rx):
-    """Notification area icon: color = state, tooltip = where, left click or Active = start/stop toggle.
-    Returns a function that removes it, or None when pystray isn't installed."""
+def tray(rx, saved, screen):
+    """Notification area icon: color = state, tooltip = where, left click or Active = start/stop toggle,
+    plus the Mirror window and the output device. Returns a function that removes it, or None when
+    pystray isn't installed."""
     try:
         import pystray
     except ImportError:
@@ -474,19 +729,39 @@ def tray(rx):
         else:
             rx.start()
 
+    def command(line):
+        try:
+            run_command(rx, saved, line)
+        except (ValueError, LookupError, OSError, sd.PortAudioError) as e:
+            log(f"error: {e}")
+
+    def output(i, name):  # pystray wants actions without extra parameters, hence the closures
+        return pystray.MenuItem(name, lambda: command(f"device {i}"), checked=lambda _item: rx.player.device == i,
+                                radio=True)
+
+    def outputs():
+        for i in wasapi()["devices"]:
+            if (d := sd.query_devices(i))["max_output_channels"]:
+                yield output(i, d["name"])
+
     def follow(icon):
         icon.visible = True
-        shown = None
+        shown = told = None
         while not done.wait(0.3):  # polled, the receiver changes state from its own thread
             if (now := (rx.state, rx.where)) != shown:
                 shown = now
                 icon.icon = images[rx.state]
-                icon.title = f"android-mic: {rx.state} {rx.where}".rstrip()[:127]  # Windows tooltip limit
+                icon.title = f"Mirror: {rx.state} {rx.where}".rstrip()[:127]  # Windows tooltip limit
                 icon.update_menu()  # refresh the Active check mark
+                if rx.state == "LISTENING" and rx.address != told:  # without a terminal this is the only hint
+                    told = rx.address
+                    icon.notify(f"On the phone connect to {rx.address}", "Mirror")
 
     # default=True: a left click on the icon runs the toggle
-    icon = pystray.Icon("android-mic", images["STOPPED"], "android-mic", pystray.Menu(
+    icon = pystray.Icon("android-mic", images["STOPPED"], "Mirror", pystray.Menu(
         pystray.MenuItem("Active", toggle, checked=lambda _item: rx.thread is not None, default=True),
+        pystray.MenuItem("Show screen", lambda: screen.show(), visible=screen is not None),
+        pystray.MenuItem("Output", pystray.Menu(outputs)),
         pystray.MenuItem("Quit", quit_app),
     ))
     threading.Thread(target=icon.run, args=(follow,), daemon=True).start()
@@ -601,7 +876,60 @@ def selftest():
         thread = rx.thread
         rx.stop()
         assert not thread.is_alive(), f"{mode} listener did not stop"
+
+    # Mirror app on the tcp listener: mic to the player, video to the window, the window's input back to the phone
+    os.environ["SDL_VIDEODRIVER"] = "dummy"  # a window without a display
+    screen = Screen()
+    rx = Receiver(Sink(), "tcp", "127.0.0.1", 0, screen)
+    rx.start()
+    phone = socket.create_connection(rx.sock.getsockname(), timeout=2)
+    phone.sendall(MIRROR_1)
+    assert phone.recv(11) == MIRROR_2
+    from_pc = phone.makefile("rb")
+
+    def from_window():
+        return json.loads(from_pc.read(int.from_bytes(from_pc.read(4), "big")))
+
+    assert from_window() == {"t": "sync"}  # the window opened and asks for a key frame
+    encoder = av.CodecContext.create("libx264", "w")
+    encoder.width, encoder.height, encoder.pix_fmt = 64, 128, "yuv420p"
+    encoder.time_base, encoder.options = fractions.Fraction(1, 30), {"tune": "zerolatency"}  # no B-frames, like phones
+    key = b"".join(bytes(p) for p in encoder.encode(av.VideoFrame(64, 128, "yuv420p")))
+    phone.sendall(framed(b"\x02" + np.array([0, 16384], "<i2").tobytes()) + framed(b"\x01" + key))
+    deadline = time.time() + 3
+    while screen.size != (64, 128) and time.time() < deadline:
+        time.sleep(0.02)
+    assert screen.size == (64, 128), "key frame not decoded"
+    e = sdl2.SDL_Event()
+    for kind, button in ((sdl2.SDL_MOUSEBUTTONDOWN, sdl2.SDL_BUTTON_LEFT), (sdl2.SDL_MOUSEBUTTONUP, sdl2.SDL_BUTTON_LEFT),
+                         (sdl2.SDL_MOUSEBUTTONDOWN, sdl2.SDL_BUTTON_RIGHT)):
+        e.type, e.button.button, e.button.x, e.button.y = kind, button, 16, 96
+        sdl2.SDL_PushEvent(e)
+    e.type, e.text.text = sdl2.SDL_TEXTINPUT, "hé".encode()
+    sdl2.SDL_PushEvent(e)
+    tap = from_window()
+    assert tap["t"] == "gesture" and tap["pts"] == [[0.25, 0.75]] * 2 and tap["ms"] >= 1, tap
+    assert from_window() == {"t": "key", "k": "back"}
+    assert from_window() == {"t": "text", "s": "hé"}
+    got = rx.player.got
+    assert len(got) == 1 and got[0][0] == 44100 and np.allclose(got[0][1][:, 0], [0, 0.5]), got
+    for s in (from_pc, phone):  # a socket only really closes once its makefile is closed too
+        s.close()
+    thread = rx.thread
+    rx.stop()
+    assert not thread.is_alive(), "mirror listener did not stop"
     print("selftest ok")
+
+
+def already_running():
+    """Mirror.exe runs once, a second copy would only fight over the port: point at the first one instead."""
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateMutexW(None, False, "Local\\Mirror")  # held until this process exits
+    if ctypes.get_last_error() != 183:  # ERROR_ALREADY_EXISTS
+        return False
+    ctypes.windll.user32.MessageBoxW(None, "Mirror is already running, its icon is in the taskbar notification area.",
+                                     "Mirror", 0x40)
+    return True
 
 
 def main():
@@ -614,7 +942,7 @@ def main():
         sys.exit(f"{CONFIG}: {e}")
 
     ap = argparse.ArgumentParser(
-        description="AndroidMic phone mic in the terminal: standalone, no desktop app, no adb. "
+        description="Phone mic (AndroidMic or the Mirror app) and the Mirror app's screen: standalone, no adb. "
                     "Settings are saved in config.toml, flags only change this run.",
         epilog=HELP, formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -633,6 +961,8 @@ def main():
         return selftest()
     if args.list:
         return list_devices()
+    if getattr(sys, "frozen", False) and already_running():
+        return
     run = {**saved, **{k: v for k, v in vars(args).items() if k in DEFAULTS and v is not None}}
     try:
         device = pick_device(run["device"])
@@ -644,8 +974,13 @@ def main():
     except sd.PortAudioError as e:
         sys.exit(f"output device: {e}, see --list")
     log(f"Output: {player.name}, latency {run['latency_ms']} ms. Type help for commands")
-    rx = Receiver(player, run["mode"], run["ip"], run["port"])
-    close_tray = None if args.no_tray else tray(rx)
+    try:
+        screen = Screen()
+    except Exception as e:  # no av/pysdl2, or no display: the mic still works
+        screen = None
+        log(f"No screen window: {e}")
+    rx = Receiver(player, run["mode"], run["ip"], run["port"], screen)
+    close_tray = None if args.no_tray else tray(rx, saved, screen)
     rx.start()
     try:
         while True:

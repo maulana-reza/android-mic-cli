@@ -2,3 +2,6 @@ numpy
 sounddevice
 pystray
 pillow
+av
+pysdl2
+pysdl2-dll
