@@ -1,3 +1,4 @@
 # local settings, written by the mode/ip/port/device/latency commands
 config.toml
+android-mic.log
 __pycache__/

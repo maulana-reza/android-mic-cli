@@ -27,6 +27,7 @@ import numpy as np
 import sounddevice as sd
 
 CONFIG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.toml")
+LOGFILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "android-mic.log")
 DEFAULTS = {"mode": "tcp", "ip": "auto", "port": 54345, "device": "default", "latency_ms": 30}
 CHECK_1, CHECK_2 = b"AndroidMic1", b"AndroidMic2"
 PHONE_MODE = {"tcp": "WIFI", "udp": "UDP"}
@@ -60,6 +61,8 @@ def width():
 
 def log(msg):
     with PRINT:
+        if not sys.stdout.isatty():  # log file: no \r or padding, they only clear the prompt line on a terminal
+            return print(time.strftime("%H:%M:%S ") + msg, flush=True)
         print(("\r" + time.strftime("%H:%M:%S ") + msg).ljust(width()), flush=True)
         if prompt:
             print(prompt, end="", flush=True)
@@ -432,6 +435,68 @@ def watch(rx):
     print()
 
 
+TRAY_COLORS = {"STOPPED": (128, 128, 128), "LISTENING": (230, 150, 0), "CONNECTED": (40, 170, 70)}
+
+
+def tray_image(color):
+    """64x64 white mic on a disc in the state's color."""
+    from PIL import Image, ImageDraw
+    img = Image.new("RGBA", (64, 64))
+    d = ImageDraw.Draw(img)
+    d.ellipse((0, 0, 63, 63), fill=color)
+    d.rounded_rectangle((24, 10, 40, 38), radius=8, fill="white")
+    d.arc((16, 18, 48, 46), 0, 180, fill="white", width=4)
+    d.line((32, 46, 32, 54), fill="white", width=4)
+    d.line((23, 54, 41, 54), fill="white", width=4)
+    return img
+
+
+def tray(rx):
+    """Notification area icon: color = state, tooltip = where, left click or Active = start/stop toggle.
+    Returns a function that removes it, or None when pystray isn't installed."""
+    try:
+        import pystray
+    except ImportError:
+        log("No tray icon: python -m pip install pystray pillow")
+        return None
+    images = {state: tray_image(color) for state, color in TRAY_COLORS.items()}
+    done = threading.Event()
+
+    def quit_app(icon):
+        done.set()
+        icon.stop()
+        rx.stop()
+        os._exit(0)  # the main thread is blocked in input(), nothing else wakes it
+
+    def toggle():
+        if rx.thread:
+            rx.stop()
+        else:
+            rx.start()
+
+    def follow(icon):
+        icon.visible = True
+        shown = None
+        while not done.wait(0.3):  # polled, the receiver changes state from its own thread
+            if (now := (rx.state, rx.where)) != shown:
+                shown = now
+                icon.icon = images[rx.state]
+                icon.title = f"android-mic: {rx.state} {rx.where}".rstrip()[:127]  # Windows tooltip limit
+                icon.update_menu()  # refresh the Active check mark
+
+    # default=True: a left click on the icon runs the toggle
+    icon = pystray.Icon("android-mic", images["STOPPED"], "android-mic", pystray.Menu(
+        pystray.MenuItem("Active", toggle, checked=lambda _item: rx.thread is not None, default=True),
+        pystray.MenuItem("Quit", quit_app),
+    ))
+    threading.Thread(target=icon.run, args=(follow,), daemon=True).start()
+
+    def close():
+        done.set()
+        icon.stop()
+    return close
+
+
 def run_command(rx, saved, line):
     """One typed command; setting changes also go to `saved` and config.toml."""
     cmd, _, arg = line.strip().partition(" ")
@@ -541,6 +606,8 @@ def selftest():
 
 def main():
     global prompt
+    if sys.stdout is None:  # pythonw (the startup shortcut): no console, log to a file, control via the tray
+        sys.stdout = sys.stderr = open(LOGFILE, "a", encoding="utf-8", buffering=1)
     try:
         saved = load_settings()
     except ValueError as e:  # TOMLDecodeError is a ValueError too
@@ -558,6 +625,7 @@ def main():
     ap.add_argument("-l", "--latency", dest="latency_ms", type=parse_latency, metavar="MS",
                     help="jitter buffer target, raise it if audio crackles")
     ap.add_argument("--list", action="store_true", help="list output devices and exit")
+    ap.add_argument("--no-tray", action="store_true", help="no notification area (tray) icon")
     ap.add_argument("--selftest", action="store_true", help=argparse.SUPPRESS)
     args = ap.parse_args()
 
@@ -577,13 +645,14 @@ def main():
         sys.exit(f"output device: {e}, see --list")
     log(f"Output: {player.name}, latency {run['latency_ms']} ms. Type help for commands")
     rx = Receiver(player, run["mode"], run["ip"], run["port"])
+    close_tray = None if args.no_tray else tray(rx)
     rx.start()
     try:
         while True:
             prompt = "mic> "
             try:
                 line = input(prompt)
-            except EOFError:  # no terminal attached: keep serving until Ctrl+C
+            except (EOFError, RuntimeError):  # no terminal (EOF) or pythonw (lost sys.stdin): serve until tray Quit or Ctrl+C
                 prompt = ""
                 while True:
                     time.sleep(1)
@@ -599,6 +668,8 @@ def main():
     finally:
         prompt = ""
         rx.stop()
+        if close_tray:
+            close_tray()
 
 
 if __name__ == "__main__":
