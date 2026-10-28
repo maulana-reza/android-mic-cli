@@ -12,6 +12,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.graphics.Point
+import android.graphics.drawable.Icon
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
 import android.media.AudioFormat
@@ -23,10 +24,10 @@ import android.media.MediaRecorder
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.os.Build
-import android.os.Bundle
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
 import android.view.Display
 import android.widget.Toast
@@ -50,7 +51,8 @@ private val READY = "MirrorReady".toByteArray()
 /**
  * Sends screen and mic to android-mic-cli on the PC over one TCP connection, and replays the input it sends back.
  * Frames both ways: 4-byte big-endian length + payload. Phone to PC: [type][data], type 0 = H.264 delta,
- * 1 = H.264 key frame with SPS/PPS, 2 = mic PCM. PC to phone: JSON for ControlService, or {"t":"sync"}.
+ * 1 = H.264 key frame with SPS/PPS, 2 = mic PCM, or no samples to stay connected while nothing else goes out.
+ * PC to phone: JSON for ControlService, or {"t":"sync"}.
  */
 class StreamService : Service() {
     private lateinit var projection: MediaProjection
@@ -59,6 +61,8 @@ class StreamService : Service() {
     @Volatile private var socket: Socket? = null
     @Volatile private var pc: DataOutputStream? = null
     @Volatile private var displayChanged = false
+    @Volatile private var restart = false // a key frame was asked for
+    @Volatile private var sentAt = 0L // the last frame to the PC, uptime ms
     private var mic = false // RECORD_AUDIO granted when the stream started
     private val main = Handler(Looper.getMainLooper())
     private val displayListener = object : DisplayManager.DisplayListener {
@@ -70,12 +74,15 @@ class StreamService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == MIC) { // the app turned the mic on or off
-            if (running) getSystemService(NotificationManager::class.java).notify(1, notification()) else stopSelf()
-            return START_NOT_STICKY
+        when (intent?.action) {
+            STOP -> stopSelf()
+            MIC -> if (running) setMic(intent.getBooleanExtra("on", micOn)) else stopSelf()
         }
-        if (running || intent == null) return START_NOT_STICKY
+        if (running || intent?.getStringExtra("pc") == null) return START_NOT_STICKY
+        address = intent.getStringExtra("pc")!!
         mic = checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+        connected = false
+        since = System.currentTimeMillis()
         goForeground() // Android 14+: must happen before getMediaProjection
         @Suppress("DEPRECATION")
         val data = intent.getParcelableExtra<Intent>("data")!!
@@ -86,20 +93,42 @@ class StreamService : Service() {
         }, main)
         getSystemService(DisplayManager::class.java).registerDisplayListener(displayListener, main)
         running = true
-        val address = intent.getStringExtra("pc")!!
         worker("encoder", ::encode)
-        worker("link") { link(address) }
-        // The mic is optional: if it fails, the screen keeps going.
-        if (mic) thread(name = "mic") { runCatching { record() }.onFailure { Log.e(TAG, "mic", it) } }
+        worker("link", ::link)
+        if (mic) startMic()
         return START_NOT_STICKY
     }
 
     override fun onDestroy() {
         running = false
-        status = "mati"
+        connected = false
         getSystemService(DisplayManager::class.java).unregisterDisplayListener(displayListener)
         runCatching { socket?.close() }
     }
+
+    /** The app or the notification turned the mic on or off. */
+    private fun setMic(on: Boolean) {
+        micOn = on
+        // Allowed only after the stream started: the mic joins now, while the app is in front for the permission.
+        if (on && !mic && checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+            mic = true
+            runCatching { goForeground() }.onFailure { Log.w(TAG, "microphone service type", it) }
+            startMic()
+        }
+        showState()
+    }
+
+    // The mic is optional: if it fails, the screen keeps going.
+    private fun startMic() = thread(name = "mic") { runCatching { record() }.onFailure { Log.e(TAG, "mic", it) } }
+
+    private fun setConnected(now: Boolean) {
+        if (connected == now) return
+        connected = now
+        since = System.currentTimeMillis()
+        if (running) showState()
+    }
+
+    private fun showState() = getSystemService(NotificationManager::class.java).notify(1, notification())
 
     private fun goForeground() {
         getSystemService(NotificationManager::class.java)
@@ -110,12 +139,30 @@ class StreamService : Service() {
         if (Build.VERSION.SDK_INT >= 29) startForeground(1, notification(), type) else startForeground(1, notification())
     }
 
-    private fun notification() = Notification.Builder(this, TAG)
-        .setSmallIcon(android.R.drawable.ic_menu_view)
-        .setContentTitle("Mirror aktif")
-        .setContentText(if (mic && micOn) "Layar dan mic dikirim ke PC" else "Layar dikirim ke PC, mic tidak")
-        .setContentIntent(PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE))
-        .build()
+    /** Where the stream goes and what it sends, with Mic and Stop for while another app is in front. */
+    private fun notification(): Notification {
+        val sending = when {
+            !mic -> "Layar dikirim, mic tidak diizinkan"
+            micOn -> "Layar dan mic dikirim ke laptop"
+            else -> "Layar dikirim, mic mati"
+        }
+        return Notification.Builder(this, TAG)
+            .setSmallIcon(R.drawable.ic_mirror)
+            .setContentTitle(if (connected) "Tersambung ke ${address.substringBeforeLast(':')}" else "Menyambung ke $address")
+            .setContentText(sending)
+            .setContentIntent(PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE))
+            .apply {
+                if (mic) addAction(action(1, if (micOn) "Matikan mic" else "Nyalakan mic",
+                    Intent(this@StreamService, StreamService::class.java).setAction(MIC).putExtra("on", !micOn)))
+            }
+            .addAction(action(2, "Stop", Intent(this, StreamService::class.java).setAction(STOP)))
+            .build()
+    }
+
+    private fun action(code: Int, label: String, intent: Intent) = Notification.Action.Builder(
+        Icon.createWithResource(this, R.drawable.ic_mirror), label,
+        PendingIntent.getService(this, code, intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+    ).build()
 
     private fun worker(name: String, body: () -> Unit) = thread(name = name) {
         try {
@@ -130,11 +177,10 @@ class StreamService : Service() {
     }
 
     /** Keeps one connection to android-mic-cli, reconnecting until the service stops. */
-    private fun link(address: String) {
+    private fun link() {
         val host = address.substringBeforeLast(':')
         val port = address.substringAfterLast(':').toInt()
         while (running) {
-            status = "menyambung ke $address"
             try {
                 Socket().use { s ->
                     socket = s
@@ -148,7 +194,7 @@ class StreamService : Service() {
                         throw IOException("$address is not android-mic-cli")
                     }
                     pc = out
-                    status = "tersambung ke $address"
+                    setConnected(true)
                     requestKeyFrame()
                     while (true) {
                         val n = input.readInt()
@@ -164,6 +210,7 @@ class StreamService : Service() {
                 Log.d(TAG, "link", e)
             } finally {
                 pc = null
+                setConnected(false)
             }
             if (running) Thread.sleep(1000)
         }
@@ -178,14 +225,17 @@ class StreamService : Service() {
                 out.write(type)
                 parts.forEach { out.write(it) }
                 out.flush()
+                sentAt = SystemClock.uptimeMillis()
             }
         } catch (e: IOException) {
             runCatching { socket?.close() } // link() reconnects
         }
     }
 
+    // The encoder only gets frames while the screen changes, so a key frame requested on a still screen never came.
+    // A new encoder starts with one.
     private fun requestKeyFrame() {
-        runCatching { codec?.setParameters(Bundle().apply { putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0) }) }
+        restart = true
     }
 
     @SuppressLint("MissingPermission") // only started with RECORD_AUDIO granted
@@ -223,7 +273,7 @@ class StreamService : Service() {
                     setInteger(MediaFormat.KEY_BIT_RATE, BIT_RATE)
                     setInteger(MediaFormat.KEY_FRAME_RATE, 60)
                     setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 10)
-                    // Re-encode the last frame on a static screen, so requested key frames still go out.
+                    // Once the screen stops changing the last frame is encoded a few more times, so it sharpens on the PC.
                     setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, 100_000)
                 }
                 val c = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
@@ -263,8 +313,16 @@ class StreamService : Service() {
                 displayChanged = false
                 if (videoSize() != size) return
             }
+            if (restart) {
+                restart = false
+                return
+            }
             val i = c.dequeueOutputBuffer(info, 100_000)
-            if (i < 0) continue
+            if (i < 0) {
+                // A still screen with the mic off sends nothing, and the PC gives up on a phone silent for 5 s.
+                if (SystemClock.uptimeMillis() - sentAt >= 1000) send(2)
+                continue
+            }
             val data = ByteArray(info.size).also { c.getOutputBuffer(i)!!.get(it) }
             c.releaseOutputBuffer(i, false)
             if ((info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0) {
@@ -284,9 +342,12 @@ class StreamService : Service() {
     }
 
     companion object {
-        const val MIC = "mic" // intent action: the app turned the mic on or off
+        const val MIC = "mic" // intent action, extra "on": the app or the notification turned the mic on or off
+        const val STOP = "stop" // intent action: Stop in the notification
         @Volatile var running = false
-        @Volatile var status = "mati"
+        @Volatile var connected = false
+        @Volatile var since = 0L // when the current connecting or connected stretch began
+        @Volatile var address = "" // the laptop, IP:port
         @Volatile var micOn = true // off: only the screen goes to the PC
     }
 }

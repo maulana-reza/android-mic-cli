@@ -1,7 +1,4 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Mirror" parent="android:Theme.Material.NoActionBar">
-        <item name="android:colorAccent">#8AB4F8</item>
-        <item name="android:statusBarColor">#303030</item>
-    </style>
+    <style name="MirrorBase" parent="android:Theme.Material.NoActionBar" />
 </resources>

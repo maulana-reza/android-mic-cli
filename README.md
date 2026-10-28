@@ -38,17 +38,18 @@ Ambil dari halaman [Releases](https://github.com/maulana-reza/android-mic-cli/re
 2. Jalankan **Mirror** dari Start menu. Jendela Mirror terbuka dengan kode QR, dan ikon mic muncul di
    tray. Judul jendela berisi alamat laptop, misalnya `192.168.43.20:54345`.
 3. Di app Mirror di HP, tap **Scan QR di laptop** lalu arahkan kamera ke kode QR. Bisa juga ketik
-   alamatnya lalu tap **Sambung**. Setelah itu izinkan mic dan rekam layar.
+   alamatnya lalu tap **Sambung**. Setelah itu izinkan mic, notifikasi, dan rekam layar.
 4. Kode QR berganti jadi layar HP, dan judul jendela jadi "Mirror - (IP HP)".
-5. Khusus APK `control`: supaya laptop bisa mengontrol HP, aktifkan sekali: di app tap **Aktifkan kontrol
-   dari laptop** → **Mirror control** → aktifkan.
+5. Khusus APK `control`: supaya laptop bisa mengontrol HP, aktifkan sekali: di kartu **Kontrol dari laptop
+   belum aktif** tap **Aktifkan** → **Mirror control** → aktifkan.
 
 Scanner QR-nya dari Google Play services, jadi app tidak meminta izin kamera. Scan pertama bisa gagal
 selama scanner-nya masih diunduh; tunggu sebentar lalu coba lagi.
 
-Untuk mengirim layar saja, matikan **Kirim suara mic** di app. Ini bisa dilakukan kapan saja tanpa
-memutus layar. Mic HP dilepas, jadi indikator mic Android ikut padam. Kalau HP diputar, jendela di laptop
-ikut jadi landscape atau portrait.
+Untuk mengirim layar saja, matikan **Kirim suara mic** sebelum menyambung, atau tap tombol **Mic** saat
+sudah tersambung. Ini bisa dilakukan kapan saja tanpa memutus layar. Mic HP dilepas, jadi indikator mic
+Android ikut padam. Selama tersambung, notifikasi Mirror juga punya tombol **Matikan mic** dan **Stop**,
+jadi app boleh ditinggal. Kalau HP diputar, jendela di laptop ikut jadi landscape atau portrait.
 
 Kontrol di jendela (APK `control`):
 
@@ -156,8 +157,13 @@ Diukur dengan itel S666LN di Wi-Fi rumah dan laptop 14 core:
 - **Keamanan:** koneksi HP ke laptop tidak dienkripsi. Pakai di hotspot HP atau Wi-Fi rumah, jangan
   di Wi-Fi publik.
 - IP hotspot bisa berubah tiap hotspot dinyalakan ulang. Kalau muncul `This PC's IP changed`, matikan
-  lalu nyalakan lagi **Active** di tray (atau ketik `start`). Di HP tap **Stop**, lalu scan ulang kode QR.
+  lalu nyalakan lagi **Active** di tray (atau ketik `start`). Di HP tap **Batal**, lalu scan ulang kode QR.
 - App Mirror di HP menyambung ulang sendiri kalau koneksi putus, jadi izin rekam layar tidak perlu diulang.
+- **Suara menggema** saat bicara ke HP: itu suara sendiri yang diputar lagi oleh laptop, telat sepersekian
+  detik (headset Bluetooth menambah jeda), atau mic HP merekam speaker laptop. Untuk live, misalnya TikTok
+  LIVE Studio, pilih **Output** `CABLE Input` dari VB-Cable di tray, lalu pakai `CABLE Output` sebagai mic
+  di aplikasinya. Dengan begitu suara HP tidak diputar ke headset atau speaker. Matikan juga mic laptop di
+  aplikasi itu, supaya suaramu tidak masuk dua kali.
 - Output stream tetap terbuka saat idle, jadi tidak ada jeda membuka device ketika HP connect.
 - Kalau output yang tersimpan tidak ada (misalnya headset Bluetooth mati), output pindah ke default Windows.
 - Batasan: swipe dijalankan setelah mouse dilepas (bukan drag live), ketikan selalu masuk di akhir

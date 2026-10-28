@@ -1,0 +1,4 @@
+<!-- Adaptive icon layers are 108dp with the inner 66dp always visible: the glyph sits well inside. -->
+<inset xmlns:android="http://schemas.android.com/apk/res/android"
+    android:drawable="@drawable/ic_mirror"
+    android:inset="30%" />

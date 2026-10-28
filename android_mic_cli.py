@@ -523,9 +523,10 @@ class Receiver:
         self.play(*decode_audio(msg))
 
     def mirror(self, packet):
-        """[type][data] from the Mirror app: 2 = 44100 Hz mono 16-bit mic, else H.264 for the screen page."""
+        """[type][data] from the Mirror app: 2 = 44100 Hz mono 16-bit mic, else H.264 for the window."""
         if packet[0] == 2:
-            self.play(44100, 1, "i16", (np.frombuffer(packet, "<i2", offset=1).astype(np.float32) / 32768).reshape(-1, 1))
+            if len(packet) > 1:  # no samples: the phone keeping the connection while its screen is still, mic off
+                self.play(44100, 1, "i16", (np.frombuffer(packet, "<i2", offset=1).astype(np.float32) / 32768).reshape(-1, 1))
         elif self.screen:
             self.screen.video(packet)
 
@@ -938,7 +939,8 @@ def selftest():
     encoder.width, encoder.height, encoder.pix_fmt = 64, 128, "yuv420p"
     encoder.time_base, encoder.options = fractions.Fraction(1, 30), {"tune": "zerolatency"}  # no B-frames, like phones
     key = b"".join(bytes(p) for p in encoder.encode(av.VideoFrame(64, 128, "yuv420p")))
-    phone.sendall(framed(b"\x02" + np.array([0, 16384], "<i2").tobytes()) + framed(b"\x01" + key))
+    keepalive = framed(b"\x02")  # must not reach the player
+    phone.sendall(keepalive + framed(b"\x02" + np.array([0, 16384], "<i2").tobytes()) + framed(b"\x01" + key))
     deadline = time.time() + 3
     while screen.size != (64, 128) and time.time() < deadline:
         time.sleep(0.02)
