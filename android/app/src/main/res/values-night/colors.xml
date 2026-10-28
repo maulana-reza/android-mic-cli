@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="ground">#101317</color>
+    <color name="surface">#1A1E24</color>
+    <color name="surface_high">#252A31</color>
+    <color name="outline">#6E7682</color>
+    <color name="line">#343A43</color>
+    <color name="dots">#4A515C</color>
+    <color name="text">#E4E7EC</color>
+    <color name="muted">#A1A8B3</color>
+    <color name="accent">#A8C7FF</color>
+    <color name="on_accent">#0B2D63</color>
+    <color name="accent_container">#26467A</color>
+    <color name="on_accent_container">#D8E4FF</color>
+    <color name="ok">#7BD88F</color>
+    <color name="wait">#F5B74F</color>
+    <color name="wait_container">#3D3220</color>
+    <color name="idle">#858C97</color>
+    <color name="stop">#D9443F</color>
+    <color name="ripple">#33FFFFFF</color>
+</resources>

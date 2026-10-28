@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Light theme; values-night has the dark one. Status colours match the tray icon on the PC:
+         grey = not connected, orange = waiting, green = connected. -->
+    <color name="ground">#F1F3F6</color>
+    <color name="surface">#FFFFFF</color>
+    <color name="surface_high">#E6E9EE</color>
+    <color name="outline">#7A818C</color> <!-- 3:1 on the ground: field and outlined button borders -->
+    <color name="line">#D5DAE1</color>
+    <color name="dots">#B9BFC8</color>
+    <color name="text">#171A1F</color>
+    <color name="muted">#59606B</color>
+    <color name="accent">#1F5BD0</color>
+    <color name="on_accent">#FFFFFF</color>
+    <color name="accent_container">#DAE4FF</color>
+    <color name="on_accent_container">#0C2E6E</color>
+    <color name="ok">#1E8E3E</color>
+    <color name="wait">#B05E00</color>
+    <color name="wait_container">#FFE7C2</color>
+    <color name="idle">#7A818C</color>
+    <color name="stop">#CC2F2B</color>
+    <color name="ripple">#1F000000</color>
+    <color name="launcher_background">#26467A</color>
+</resources>
