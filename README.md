@@ -40,11 +40,15 @@ Ambil dari halaman [Releases](https://github.com/maulana-reza/android-mic-cli/re
 3. Di app Mirror di HP, tap **Scan QR di laptop** lalu arahkan kamera ke kode QR. Bisa juga ketik
    alamatnya lalu tap **Sambung**. Setelah itu izinkan mic dan rekam layar.
 4. Kode QR berganti jadi layar HP, dan judul jendela jadi "Mirror - (IP HP)".
-5. Khusus APK `control`: supaya laptop bisa mengontrol HP, aktifkan sekali: di app tap **Izin kontrol** →
-   **Mirror control** → aktifkan.
+5. Khusus APK `control`: supaya laptop bisa mengontrol HP, aktifkan sekali: di app tap **Aktifkan kontrol
+   dari laptop** → **Mirror control** → aktifkan.
 
 Scanner QR-nya dari Google Play services, jadi app tidak meminta izin kamera. Scan pertama bisa gagal
 selama scanner-nya masih diunduh; tunggu sebentar lalu coba lagi.
+
+Untuk mengirim layar saja, matikan **Kirim suara mic** di app. Ini bisa dilakukan kapan saja tanpa
+memutus layar. Mic HP dilepas, jadi indikator mic Android ikut padam. Kalau HP diputar, jendela di laptop
+ikut jadi landscape atau portrait.
 
 Kontrol di jendela (APK `control`):
 

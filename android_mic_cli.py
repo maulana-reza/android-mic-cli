@@ -395,7 +395,19 @@ class Screen:
         self.texture = sdl2.SDL_CreateTexture(self.renderer, sdl2.SDL_PIXELFORMAT_IYUV,
                                               sdl2.SDL_TEXTUREACCESS_STREAMING, w, h)
         self.size = (w, h)
-        sdl2.SDL_SetWindowSize(self.window, *self.fit(w, h))  # the phone's shape: first frame, or it rotated
+        # The phone's shape (first frame, or it rotated), around the window's old centre and back inside the
+        # screen, so a portrait window turning landscape doesn't grow off the right edge.
+        x, y, old_w, old_h, top, left, bottom, right = (ctypes.c_int() for _ in range(8))
+        sdl2.SDL_GetWindowPosition(self.window, x, y)
+        sdl2.SDL_GetWindowSize(self.window, old_w, old_h)
+        sdl2.SDL_GetWindowBordersSize(self.window, top, left, bottom, right)  # title bar and frame
+        r = sdl2.SDL_Rect()
+        sdl2.SDL_GetDisplayUsableBounds(sdl2.SDL_GetWindowDisplayIndex(self.window), r)
+        w, h = self.fit(w, h)
+        sdl2.SDL_SetWindowSize(self.window, w, h)
+        sdl2.SDL_SetWindowPosition(self.window,
+                                   min(max(x.value + (old_w.value - w) // 2, r.x + left.value), r.x + r.w - right.value - w),
+                                   min(max(y.value + (old_h.value - h) // 2, r.y + top.value), r.y + r.h - bottom.value - h))
 
     def pos(self, x, y):
         """Point in video pixels -> 0..1 on the phone screen."""

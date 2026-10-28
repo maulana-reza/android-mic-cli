@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Platform Material, no AndroidX. values-night has the dark one for the system's dark theme. -->
+    <style name="Mirror" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:colorAccent">#1A73E8</item>
+        <!-- Before Android 15 the status bar has its own colour: the page's, with dark icons. -->
+        <item name="android:statusBarColor">#FAFAFA</item>
+        <item name="android:windowLightStatusBar">true</item>
+    </style>
+</resources>

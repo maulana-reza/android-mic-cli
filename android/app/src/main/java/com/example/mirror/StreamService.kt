@@ -59,6 +59,7 @@ class StreamService : Service() {
     @Volatile private var socket: Socket? = null
     @Volatile private var pc: DataOutputStream? = null
     @Volatile private var displayChanged = false
+    private var mic = false // RECORD_AUDIO granted when the stream started
     private val main = Handler(Looper.getMainLooper())
     private val displayListener = object : DisplayManager.DisplayListener {
         override fun onDisplayAdded(displayId: Int) {}
@@ -69,9 +70,13 @@ class StreamService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == MIC) { // the app turned the mic on or off
+            if (running) getSystemService(NotificationManager::class.java).notify(1, notification()) else stopSelf()
+            return START_NOT_STICKY
+        }
         if (running || intent == null) return START_NOT_STICKY
-        val mic = checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
-        goForeground(mic) // Android 14+: must happen before getMediaProjection
+        mic = checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+        goForeground() // Android 14+: must happen before getMediaProjection
         @Suppress("DEPRECATION")
         val data = intent.getParcelableExtra<Intent>("data")!!
         projection = getSystemService(MediaProjectionManager::class.java)
@@ -96,19 +101,21 @@ class StreamService : Service() {
         runCatching { socket?.close() }
     }
 
-    private fun goForeground(mic: Boolean) {
+    private fun goForeground() {
         getSystemService(NotificationManager::class.java)
             .createNotificationChannel(NotificationChannel(TAG, "Mirror", NotificationManager.IMPORTANCE_LOW))
-        val notification = Notification.Builder(this, TAG)
-            .setSmallIcon(android.R.drawable.ic_menu_view)
-            .setContentTitle("Mirror aktif")
-            .setContentText("Layar dan mic dikirim ke PC")
-            .setContentIntent(PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE))
-            .build()
+        // With the mic type even while the mic is off, so turning it on later is still allowed in the background.
         val type = ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION or
             if (mic && Build.VERSION.SDK_INT >= 30) ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE else 0
-        if (Build.VERSION.SDK_INT >= 29) startForeground(1, notification, type) else startForeground(1, notification)
+        if (Build.VERSION.SDK_INT >= 29) startForeground(1, notification(), type) else startForeground(1, notification())
     }
+
+    private fun notification() = Notification.Builder(this, TAG)
+        .setSmallIcon(android.R.drawable.ic_menu_view)
+        .setContentTitle("Mirror aktif")
+        .setContentText(if (mic && micOn) "Layar dan mic dikirim ke PC" else "Layar dikirim ke PC, mic tidak")
+        .setContentIntent(PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE))
+        .build()
 
     private fun worker(name: String, body: () -> Unit) = thread(name = name) {
         try {
@@ -183,21 +190,26 @@ class StreamService : Service() {
 
     @SuppressLint("MissingPermission") // only started with RECORD_AUDIO granted
     private fun record() {
-        val chunk = SAMPLE_RATE / 50 * 2 // 20 ms of 16-bit mono
-        // Half a second of buffer rides out a key frame holding the connection.
-        val recorder = AudioRecord(
-            MediaRecorder.AudioSource.MIC, SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT,
-            maxOf(AudioRecord.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT), SAMPLE_RATE)
-        )
-        try {
-            recorder.startRecording()
-            val buffer = ByteArray(chunk)
-            while (running) {
-                val n = recorder.read(buffer, 0, buffer.size)
-                if (n > 0) send(2, buffer.copyOf(n))
+        val buffer = ByteArray(SAMPLE_RATE / 50 * 2) // 20 ms of 16-bit mono
+        while (running) {
+            if (!micOn) { // turned off in the app: the mic is let go, so Android's mic indicator goes out too
+                Thread.sleep(100)
+                continue
             }
-        } finally {
-            recorder.release()
+            // Half a second of buffer rides out a key frame holding the connection.
+            val recorder = AudioRecord(
+                MediaRecorder.AudioSource.MIC, SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT,
+                maxOf(AudioRecord.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT), SAMPLE_RATE)
+            )
+            try {
+                recorder.startRecording()
+                while (running && micOn) {
+                    val n = recorder.read(buffer, 0, buffer.size)
+                    if (n > 0) send(2, buffer.copyOf(n))
+                }
+            } finally {
+                recorder.release()
+            }
         }
     }
 
@@ -272,8 +284,10 @@ class StreamService : Service() {
     }
 
     companion object {
+        const val MIC = "mic" // intent action: the app turned the mic on or off
         @Volatile var running = false
         @Volatile var status = "mati"
+        @Volatile var micOn = true // off: only the screen goes to the PC
     }
 }
 
