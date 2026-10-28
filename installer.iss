@@ -1,6 +1,6 @@
 ; Mirror for Windows, compiled by build.bat with Inno Setup 6 into dist\Mirror-Setup-<version>.exe.
 ; Installs for the current user only, so config.toml next to Mirror.exe stays writable.
-#define AppVersion "0.1.0"
+#define AppVersion "0.2.0"
 
 [Setup]
 AppId={{F01847B5-6431-4F41-99E0-8F8D60546097}
@@ -31,7 +31,7 @@ Source: "dist\Mirror\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs c
 
 [Icons]
 Name: "{autoprograms}\Mirror"; Filename: "{app}\Mirror.exe"
-Name: "{userstartup}\Mirror"; Filename: "{app}\Mirror.exe"; Tasks: startup
+Name: "{userstartup}\Mirror"; Filename: "{app}\Mirror.exe"; Parameters: "--background"; Tasks: startup
 Name: "{autodesktop}\Mirror"; Filename: "{app}\Mirror.exe"; Tasks: desktopicon
 
 [Run]

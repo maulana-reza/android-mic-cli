@@ -2,6 +2,7 @@ package com.example.mirror
 
 import android.Manifest
 import android.app.Activity
+import android.content.ComponentName
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.projection.MediaProjectionConfig
@@ -15,11 +16,20 @@ import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
+import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
+
+private val ADDRESS = Regex("""[\w.-]+:\d{1,5}""")
 
 class MainActivity : Activity() {
     private lateinit var status: TextView
     private lateinit var address: EditText
     private val prefs by lazy { getSharedPreferences("mirror", MODE_PRIVATE) }
+
+    // Only the control flavor declares the accessibility service, see src/control/AndroidManifest.xml.
+    @Suppress("DEPRECATION")
+    private val control by lazy {
+        runCatching { packageManager.getServiceInfo(ComponentName(this, ControlService::class.java), 0) }.isSuccess
+    }
     private val tick = object : Runnable {
         override fun run() {
             refresh()
@@ -45,10 +55,25 @@ class MainActivity : Activity() {
         }
         root.addView(status)
         root.addView(address)
+        root.addView(button("Scan QR di laptop") { scan() })
         root.addView(button("Sambung") { connect() })
         root.addView(button("Stop") { stopService(Intent(this, StreamService::class.java)) })
-        root.addView(button("Izin kontrol (Accessibility)") { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) })
+        if (control) root.addView(button("Izin kontrol (Accessibility)") { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) })
         setContentView(root)
+    }
+
+    // The laptop's Mirror window shows mirror://IP:port as a QR code until a phone connects.
+    private fun scan() {
+        GmsBarcodeScanning.getClient(this).startScan()
+            .addOnSuccessListener {
+                val pc = it.rawValue.orEmpty().removePrefix("mirror://")
+                if (ADDRESS.matches(pc)) {
+                    address.setText(pc)
+                    connect()
+                } else Toast.makeText(this, "Itu bukan kode QR Mirror", Toast.LENGTH_SHORT).show()
+            }
+            // The first scan can fail while Google Play services is still downloading the scanner.
+            .addOnFailureListener { Toast.makeText(this, "Scanner belum siap, coba lagi sebentar: ${it.message}", Toast.LENGTH_LONG).show() }
     }
 
     override fun onResume() {
@@ -63,7 +88,7 @@ class MainActivity : Activity() {
 
     private fun connect() {
         val pc = address.text.toString().trim()
-        if (!Regex("""[\w.-]+:\d{1,5}""").matches(pc)) {
+        if (!ADDRESS.matches(pc)) {
             address.error = "Format IP:port, contoh 192.168.1.8:5555"
             return
         }
@@ -102,9 +127,9 @@ class MainActivity : Activity() {
         status.text = buildString {
             appendLine("Layar + mic: ${StreamService.status}")
             appendLine(if (mic) "● Mic diizinkan" else "○ Mic belum diizinkan, hanya layar yang dikirim")
-            appendLine(if (ControlService.instance != null) "● Kontrol aktif" else "○ Kontrol mati: aktifkan \"Mirror control\" di Accessibility")
+            if (control) appendLine(if (ControlService.instance != null) "● Kontrol aktif" else "○ Kontrol mati: aktifkan \"Mirror control\" di Accessibility")
             appendLine()
-            appendLine("Alamat = IP:port dari baris \"On the phone\" di android-mic-cli:")
+            appendLine("Scan kode QR di jendela Mirror di laptop, atau ketik IP:port dari judul jendelanya:")
         }
     }
 

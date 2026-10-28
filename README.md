@@ -5,9 +5,9 @@ dan tanpa aplikasi AndroidMic desktop.
 
 - Suara mic HP diputar ke output device, misalnya `CABLE Input` dari VB-Cable, supaya bisa dipakai
   sebagai mic di Zoom atau Discord.
-- Dengan app **Mirror** di HP, layar HP juga tampil di jendela laptop dan bisa dikontrol pakai mouse dan
-  keyboard. Mic dan layar lewat satu koneksi yang sama. Decode-nya pakai FFmpeg dan render-nya pakai
-  SDL2, seperti scrcpy.
+- Dengan app **Mirror** di HP, layar HP juga tampil di jendela laptop. Versi `control` juga bisa
+  dikontrol pakai mouse dan keyboard. Mic dan layar lewat satu koneksi yang sama. Decode-nya pakai FFmpeg
+  dan render-nya pakai SDL2, seperti scrcpy.
 - App **AndroidMic** 2.2.x tetap didukung sebagai pengirim mic saja.
 
 | Folder | Isi |
@@ -20,24 +20,33 @@ dan tanpa aplikasi AndroidMic desktop.
 Ambil dari halaman [Releases](https://github.com/maulana-reza/android-mic-cli/releases):
 
 - **Windows**: `Mirror-Setup-<versi>.exe`. Installer ini memasang untuk user ini saja (tanpa admin) dan
-  membuat shortcut Start menu. Ada pilihan supaya Mirror jalan otomatis saat login. Installer belum
-  ditandatangani, jadi SmartScreen mungkin menampilkan peringatan: klik **More info → Run anyway**.
-- **Android 8+**: `Mirror-<versi>.apk`. Izinkan install dari sumber tidak dikenal. Di Android 13+, izin
-  Accessibility untuk APK dari luar Play Store diblokir "restricted settings": buka **App info → ⋮ →
-  Allow restricted settings**.
+  membuat shortcut Start menu. Ada pilihan supaya Mirror jalan otomatis saat login; jendelanya baru
+  muncul saat HP tersambung. Installer belum ditandatangani, jadi SmartScreen mungkin menampilkan
+  peringatan: klik **More info → Run anyway**.
+- **Android 8+**, pilih salah satu. Nama paketnya sama, jadi yang satu menggantikan yang lain.
+  - `Mirror-<versi>.apk`: layar dan mic. Bisa dipasang dari browser, WhatsApp, atau file manager.
+  - `Mirror-<versi>-control.apk`: ditambah kontrol klik dan ketik dari laptop lewat Accessibility. Play
+    Protect di Indonesia memblokir pemasangan app yang memakai Accessibility kalau APK-nya dibuka dari
+    browser, aplikasi chat, atau file manager. Jadi pasang lewat adb dari laptop:
+    `adb install -r Mirror-<versi>-control.apk`.
+
+  Kalau `Mirror-<versi>.apk` pun masih diblokir, pasang lewat adb dengan cara yang sama.
 
 ## Cara menjalankan
 
 1. Sambungkan HP dan laptop ke jaringan yang sama (hotspot HP atau Wi-Fi yang sama).
-2. Jalankan **Mirror** dari Start menu. Ikon mic muncul di tray, dan notifikasi menampilkan alamat yang
-   harus diisi di HP, misalnya `On the phone connect to 192.168.43.20:54345`. Alamat ini juga terlihat
-   kalau kursor diarahkan ke ikon tray.
-3. Di app Mirror di HP, isi **IP:port** tersebut, tap **Sambung**, lalu izinkan mic dan rekam layar.
-4. Jendela "Mirror - (IP HP)" terbuka dengan layar HP.
-5. Supaya laptop bisa mengontrol HP, aktifkan sekali: di app tap **Izin kontrol** → **Mirror control** →
-   aktifkan.
+2. Jalankan **Mirror** dari Start menu. Jendela Mirror terbuka dengan kode QR, dan ikon mic muncul di
+   tray. Judul jendela berisi alamat laptop, misalnya `192.168.43.20:54345`.
+3. Di app Mirror di HP, tap **Scan QR di laptop** lalu arahkan kamera ke kode QR. Bisa juga ketik
+   alamatnya lalu tap **Sambung**. Setelah itu izinkan mic dan rekam layar.
+4. Kode QR berganti jadi layar HP, dan judul jendela jadi "Mirror - (IP HP)".
+5. Khusus APK `control`: supaya laptop bisa mengontrol HP, aktifkan sekali: di app tap **Izin kontrol** →
+   **Mirror control** → aktifkan.
 
-Kontrol di jendela:
+Scanner QR-nya dari Google Play services, jadi app tidak meminta izin kamera. Scan pertama bisa gagal
+selama scanner-nya masih diunduh; tunggu sebentar lalu coba lagi.
+
+Kontrol di jendela (APK `control`):
 
 | Laptop | HP |
 |---|---|
@@ -50,7 +59,7 @@ Kontrol di jendela:
 | `Ctrl+V` | paste (pakai ini untuk password) |
 
 Menutup jendela tidak memutus HP, mic tetap jalan. Untuk membukanya lagi, pakai menu tray **Show
-screen**. Selama jendela ditutup atau di-minimize, video tidak di-decode sama sekali.
+window**. Selama jendela ditutup atau di-minimize, video tidak di-decode sama sekali.
 
 ### Hanya mic, dengan app AndroidMic
 
@@ -68,7 +77,7 @@ Warna ikon menunjukkan status:
 **Klik kiri** ikon untuk menyalakan/mematikan listener. Klik kanan untuk membuka menu:
 
 - **Active**: centang berarti listener menyala.
-- **Show screen**: buka jendela layar HP.
+- **Show window**: buka jendela Mirror (kode QR, atau layar HP kalau sudah tersambung).
 - **Output**: pilih output device (tersimpan).
 - **Quit**: keluar.
 
@@ -96,7 +105,8 @@ lalu jalankan `android-mic.bat`. Fiturnya sama dengan app Windows, plus prompt `
 
 `mode`, `ip`, `port`, `device`, dan `latency` otomatis disimpan ke `config.toml` di folder ini. File itu
 juga bisa diedit manual. Untuk sekali jalan saja (tidak disimpan) bisa pakai flag: `-m tcp|udp`, `-i IP`,
-`-p PORT`, `-d DEVICE`, `-l MS`, `--list`, `--no-tray`. Contoh: `android-mic.bat -d "cable input"`.
+`-p PORT`, `-d DEVICE`, `-l MS`, `--list`, `--no-tray`, `--background` (jendela baru muncul saat HP
+tersambung). Contoh: `android-mic.bat -d "cable input"`.
 Lihat `-h`.
 
 Untuk auto start tanpa jendela terminal, buat shortcut di folder Startup Windows (`Win+R` →
@@ -115,7 +125,8 @@ App Android, dari folder `android/`:
 gradlew.bat assembleRelease
 ```
 
-Hasilnya di `android\app\build\outputs\apk\release\`. APK rilis ditandatangani dengan kunci dari
+Hasilnya di `android\app\build\outputs\apk\standard\release\` (tanpa kontrol) dan
+`android\app\build\outputs\apk\control\release\` (dengan kontrol). APK rilis ditandatangani dengan kunci dari
 `android\keystore.properties` (`storeFile`, `storePassword`, `keyAlias`, `keyPassword`). File itu tidak
 masuk git. Tanpa file itu, APK rilis keluar tanpa tanda tangan. Untuk mencoba cepat, pakai
 `gradlew.bat assembleDebug`.
@@ -141,7 +152,7 @@ Diukur dengan itel S666LN di Wi-Fi rumah dan laptop 14 core:
 - **Keamanan:** koneksi HP ke laptop tidak dienkripsi. Pakai di hotspot HP atau Wi-Fi rumah, jangan
   di Wi-Fi publik.
 - IP hotspot bisa berubah tiap hotspot dinyalakan ulang. Kalau muncul `This PC's IP changed`, matikan
-  lalu nyalakan lagi **Active** di tray (atau ketik `start`), lalu ganti IP di HP.
+  lalu nyalakan lagi **Active** di tray (atau ketik `start`). Di HP tap **Stop**, lalu scan ulang kode QR.
 - App Mirror di HP menyambung ulang sendiri kalau koneksi putus, jadi izin rekam layar tidak perlu diulang.
 - Output stream tetap terbuka saat idle, jadi tidak ada jeda membuka device ketika HP connect.
 - Kalau output yang tersimpan tidak ada (misalnya headset Bluetooth mati), output pindah ke default Windows.

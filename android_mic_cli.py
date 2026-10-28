@@ -35,6 +35,7 @@ try:
     import sdl2dll  # sets PYSDL2_DLL_PATH first, so importing sdl2 doesn't warn about where its DLL came from
     import av
     import sdl2
+    import segno
 except ImportError:  # no screen window, the mic still plays
     sdl2 = None
 
@@ -205,18 +206,21 @@ def clamp(v):
 
 class Screen:
     """The Mirror app's screen in a window, decoded by FFmpeg and drawn by SDL2 like scrcpy, the window's
-    clicks and keys back to the phone. One thread owns the window, the decoder and every SDL call.
+    clicks and keys back to the phone. Until a phone connects the window shows a QR code with this PC's
+    address, for the app to scan. One thread owns the window, the decoder and every SDL call.
     While the window is closed or minimized the video is dropped, nothing gets decoded."""
 
     def __init__(self):
         if sdl2 is None:
-            raise ImportError("needs av, pysdl2 and pysdl2-dll: python -m pip install -r requirements.txt")
+            raise ImportError("needs av, pysdl2, pysdl2-dll and segno: python -m pip install -r requirements.txt")
         self.phone = None  # send(msg) to the connected Mirror phone
         self.packets = collections.deque()
         self.showing = False  # window open and not minimized, video() drops packets otherwise
         self.want = threading.Event()  # open the window, or bring it to the front
         self.window = self.renderer = self.texture = self.decoder = self.stroke = None
         self.title, self.size, self.mouse, self.wheel_at, self.error = "Mirror", (720, 1600), (0, 0), 0, None
+        self.waiting = "Mirror - waiting for the phone"  # title while no phone is connected
+        self.pair = self.qr = self.qr_for = None  # what the QR code says, its texture, what that texture says
         self.keys = {sdl2.SDLK_BACKSPACE: "del", sdl2.SDLK_RETURN: "enter", sdl2.SDLK_KP_ENTER: "enter",
                      sdl2.SDLK_ESCAPE: "back"}
         self.alt_keys = {sdl2.SDLK_b: "back", sdl2.SDLK_h: "home", sdl2.SDLK_s: "recents"}  # as in scrcpy
@@ -255,7 +259,7 @@ class Screen:
             if sdl2.SDL_GetWindowFlags(self.window) & sdl2.SDL_WINDOW_MINIMIZED:
                 sdl2.SDL_RestoreWindow(self.window)
             return sdl2.SDL_RaiseWindow(self.window)
-        w, h = self.fit(*self.size)
+        w, h = self.fit(*self.size) if self.phone else self.fit(560, 560)  # the phone's shape, or the QR code's
         self.window = sdl2.SDL_CreateWindow(self.title.encode(), sdl2.SDL_WINDOWPOS_CENTERED,
                                             sdl2.SDL_WINDOWPOS_CENTERED, w, h, sdl2.SDL_WINDOW_RESIZABLE)
         if not self.window:
@@ -275,9 +279,9 @@ class Screen:
 
     def close(self):
         self.showing = False
-        sdl2.SDL_DestroyRenderer(self.renderer)  # frees the texture too
+        sdl2.SDL_DestroyRenderer(self.renderer)  # frees the textures too
         sdl2.SDL_DestroyWindow(self.window)
-        self.window = self.renderer = self.texture = self.decoder = self.stroke = None
+        self.window = self.renderer = self.texture = self.decoder = self.stroke = self.qr = self.qr_for = None
 
     def fit(self, w, h):
         """Window size for a w x h video: what fits in 90% of the screen, never enlarged."""
@@ -288,9 +292,10 @@ class Screen:
 
     def handle(self, e):
         if e.type == self.wake:
-            if self.title != self.shown_title:
+            if self.title != self.shown_title:  # connected, disconnected or a new address: draw that too
                 self.shown_title = self.title
                 sdl2.SDL_SetWindowTitle(self.window, self.title.encode())
+                self.draw()
             self.drain()
         elif e.type == sdl2.SDL_WINDOWEVENT:
             what = e.window.event
@@ -361,20 +366,36 @@ class Screen:
                                           sdl2.surface.SDL_YUV_CONVERSION_BT601)
             y, u, v = ((ctypes.cast(p.buffer_ptr, ctypes.POINTER(ctypes.c_ubyte)), p.line_size) for p in frame.planes)
             sdl2.SDL_UpdateYUVTexture(self.texture, None, *y, *u, *v)
+        qr = not self.phone and self.pair
+        sdl2.SDL_SetRenderDrawColor(self.renderer, *((255, 255, 255) if qr else (0, 0, 0)), 255)
         sdl2.SDL_RenderClear(self.renderer)
-        if self.texture:
+        if qr:  # no phone yet: the QR code for the Mirror app to scan
+            self.draw_qr()
+        elif self.texture:
+            sdl2.SDL_RenderSetLogicalSize(self.renderer, *self.size)  # letterboxed, mouse events in video pixels
             sdl2.SDL_RenderCopy(self.renderer, self.texture, None, None)
         sdl2.SDL_RenderPresent(self.renderer)
+
+    def draw_qr(self):
+        if self.qr_for != self.pair:
+            rows = list(segno.make(self.pair, error="m").matrix_iter(border=4))  # with the white margin scanners need
+            n = len(rows)
+            if self.qr:
+                sdl2.SDL_DestroyTexture(self.qr)
+            self.qr = sdl2.SDL_CreateTexture(self.renderer, sdl2.SDL_PIXELFORMAT_RGB24, sdl2.SDL_TEXTUREACCESS_STATIC, n, n)
+            sdl2.SDL_UpdateTexture(self.qr, None, bytes(0 if dark else 255 for row in rows for dark in row for _ in "rgb"), n * 3)
+            sdl2.SDL_SetTextureScaleMode(self.qr, sdl2.SDL_ScaleModeNearest)  # sharp modules, not blurred ones
+            self.qr_for, self.qr_size = self.pair, n
+        sdl2.SDL_RenderSetLogicalSize(self.renderer, self.qr_size, self.qr_size)
+        sdl2.SDL_RenderCopy(self.renderer, self.qr, None, None)
 
     def new_texture(self, w, h):
         if self.texture:
             sdl2.SDL_DestroyTexture(self.texture)
         self.texture = sdl2.SDL_CreateTexture(self.renderer, sdl2.SDL_PIXELFORMAT_IYUV,
                                               sdl2.SDL_TEXTUREACCESS_STREAMING, w, h)
-        sdl2.SDL_RenderSetLogicalSize(self.renderer, w, h)  # letterboxed, and mouse events come in video pixels
-        if (w, h) != self.size:  # the phone rotated: the window takes the new shape
-            self.size = (w, h)
-            sdl2.SDL_SetWindowSize(self.window, *self.fit(w, h))
+        self.size = (w, h)
+        sdl2.SDL_SetWindowSize(self.window, *self.fit(w, h))  # the phone's shape: first frame, or it rotated
 
     def pos(self, x, y):
         """Point in video pixels -> 0..1 on the phone screen."""
@@ -396,7 +417,15 @@ class Screen:
 
     def detach(self):
         self.phone = None
-        self.title = "Mirror - disconnected"
+        self.title = self.waiting
+        self.poke()
+
+    def pairing(self, address):
+        """Where the Mirror app connects to: the QR code until a phone does, and the title for typing it in."""
+        self.pair = f"mirror://{address}"
+        self.waiting = f"Mirror - scan the QR code in the phone app, or enter {address}"
+        if not self.phone:
+            self.title = self.waiting
         self.poke()
 
     def show(self):
@@ -462,6 +491,8 @@ class Receiver:
     def hint(self):
         ip = primary_ip() if self.host == "0.0.0.0" else self.host
         self.address = f"{ip}:{self.port}"
+        if self.screen and self.mode == "tcp":  # the Mirror app only speaks tcp
+            self.screen.pairing(self.address)
         mirror = f"Mirror app {self.address} then Sambung, or " if self.mode == "tcp" else ""
         log(f"On the phone: {mirror}AndroidMic mode {PHONE_MODE[self.mode]}, IP {ip}, port {self.port}, then tap Connect")
 
@@ -753,14 +784,14 @@ def tray(rx, saved, screen):
                 icon.icon = images[rx.state]
                 icon.title = f"Mirror: {rx.state} {rx.where}".rstrip()[:127]  # Windows tooltip limit
                 icon.update_menu()  # refresh the Active check mark
-                if rx.state == "LISTENING" and rx.address != told:  # without a terminal this is the only hint
+                if rx.state == "LISTENING" and rx.address != told:  # the window may be closed, this always shows
                     told = rx.address
-                    icon.notify(f"On the phone connect to {rx.address}", "Mirror")
+                    icon.notify(f"Scan the QR code in the Mirror window, or enter {rx.address} in the phone app", "Mirror")
 
     # default=True: a left click on the icon runs the toggle
     icon = pystray.Icon("android-mic", images["STOPPED"], "Mirror", pystray.Menu(
         pystray.MenuItem("Active", toggle, checked=lambda _item: rx.thread is not None, default=True),
-        pystray.MenuItem("Show screen", lambda: screen.show(), visible=screen is not None),
+        pystray.MenuItem("Show window", lambda: screen.show(), visible=screen is not None),  # QR code or phone
         pystray.MenuItem("Output", pystray.Menu(outputs)),
         pystray.MenuItem("Quit", quit_app),
     ))
@@ -915,6 +946,11 @@ def selftest():
     assert len(got) == 1 and got[0][0] == 44100 and np.allclose(got[0][1][:, 0], [0, 0.5]), got
     for s in (from_pc, phone):  # a socket only really closes once its makefile is closed too
         s.close()
+    assert screen.pair == "mirror://127.0.0.1:0", screen.pair  # the listen address, port 0 in this test
+    deadline = time.time() + 3
+    while screen.qr_for != screen.pair and time.time() < deadline:  # the phone left: the QR code is back
+        time.sleep(0.02)
+    assert screen.qr_for == screen.pair and screen.qr_size == 25 + 8, "QR code not drawn"  # version 2 + margin
     thread = rx.thread
     rx.stop()
     assert not thread.is_alive(), "mirror listener did not stop"
@@ -954,6 +990,8 @@ def main():
                     help="jitter buffer target, raise it if audio crackles")
     ap.add_argument("--list", action="store_true", help="list output devices and exit")
     ap.add_argument("--no-tray", action="store_true", help="no notification area (tray) icon")
+    ap.add_argument("--background", action="store_true",
+                    help="no window until a phone connects, for starting at sign-in")
     ap.add_argument("--selftest", action="store_true", help=argparse.SUPPRESS)
     args = ap.parse_args()
 
@@ -982,6 +1020,8 @@ def main():
     rx = Receiver(player, run["mode"], run["ip"], run["port"], screen)
     close_tray = None if args.no_tray else tray(rx, saved, screen)
     rx.start()
+    if screen and rx.mode == "tcp" and not args.background:
+        screen.show()  # the QR code to pair the phone with
     try:
         while True:
             prompt = "mic> "
