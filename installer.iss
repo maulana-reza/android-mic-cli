@@ -1,6 +1,6 @@
 ; Mirror for Windows, compiled by build.bat with Inno Setup 6 into dist\Mirror-Setup-<version>.exe.
 ; Installs for the current user only, so config.toml next to Mirror.exe stays writable.
-#define AppVersion "0.4.0"
+#define AppVersion "0.4.1"
 
 [Setup]
 AppId={{F01847B5-6431-4F41-99E0-8F8D60546097}

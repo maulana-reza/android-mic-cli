@@ -9,6 +9,8 @@ Android app 2.2.x, or the Mirror app from this project, and connects over its ho
   Frames back to the phone carry the window's input as JSON.
 - UDP (phone mode UDP): datagrams with the same length prefix + MessageWrapper
   (connect request, or audio packet with a sequence number).
+Nothing is encrypted or password protected, so on a network Windows calls Public (one the user never marked as
+trusted, like a cafe's Wi-Fi) it doesn't listen at all, and hides the address and the QR code.
 Settings are kept in config.toml next to this script, or next to Mirror.exe when installed.
 """
 import argparse
@@ -22,6 +24,7 @@ import json
 import os
 import shutil
 import socket
+import subprocess
 import sys
 import tempfile
 import threading
@@ -371,7 +374,7 @@ class Screen:
         sdl2.SDL_RenderClear(self.renderer)
         if qr:  # no phone yet: the QR code for the Mirror app to scan
             self.draw_qr()
-        elif self.texture:
+        elif self.phone and self.texture:  # not the last phone's screen once it left
             sdl2.SDL_RenderSetLogicalSize(self.renderer, *self.size)  # letterboxed, mouse events in video pixels
             sdl2.SDL_RenderCopy(self.renderer, self.texture, None, None)
         sdl2.SDL_RenderPresent(self.renderer)
@@ -440,6 +443,14 @@ class Screen:
             self.title = self.waiting
         self.poke()
 
+    def hidden(self, why):
+        """Not listening on this network: no QR code and no address, only why in the title."""
+        self.pair = None
+        self.waiting = f"Mirror - {why}"
+        if not self.phone:
+            self.title = self.waiting
+        self.poke()
+
     def show(self):
         """Open the window, or bring it to the front."""
         self.want.set()
@@ -468,9 +479,16 @@ class Receiver:
         self.stopping = threading.Event()
         self.state, self.where, self.fmt, self.t0 = "STOPPED", "", "", None
 
+    @property
+    def active(self):
+        """Listening, connected, or hidden until the network is trusted: the tray's Active check mark."""
+        return self.thread is not None or self.state == "HIDDEN"
+
     def start(self):
         self.stop()
         self.host = primary_ip() if self.ip == "auto" else self.ip  # picked on every start, hotspot IPs change
+        if network := public_network(self.host):
+            return self.hide(network)
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM if self.mode == "udp" else socket.SOCK_STREAM)
         try:
             sock.bind((self.host, self.port))
@@ -488,6 +506,8 @@ class Receiver:
         self.thread.start()
 
     def stop(self):
+        if self.state == "HIDDEN":  # nothing is open, it only waited for the network to be trusted
+            self.state, self.where = "STOPPED", ""
         if not self.thread:
             return
         self.stopping.set()
@@ -507,6 +527,14 @@ class Receiver:
             self.screen.pairing(self.address)
         mirror = f"Mirror app {self.address} then Sambung, or " if self.mode == "tcp" else ""
         log(f"On the phone: {mirror}AndroidMic mode {PHONE_MODE[self.mode]}, IP {ip}, port {self.port}, then tap Connect")
+
+    def hide(self, network):
+        """Anyone on a Public network could connect, see what the window sends or play into the mic: stay closed."""
+        self.state, self.where = "HIDDEN", network
+        log(f"Hidden: Windows marks the network {network} Public, so nothing listens here. If it is your own Wi-Fi or "
+            f"hotspot, make it Private in Settings > Network & internet > Wi-Fi > {network}, this starts by itself then")
+        if self.screen:
+            self.screen.hidden(f"hidden on the Public network {network}, make it Private in Windows to connect")
 
     def listening(self):
         self.state, self.where, self.fmt, self.t0 = "LISTENING", f"{self.host}:{self.port} ({self.mode})", "", None
@@ -677,6 +705,38 @@ def local_ips():
     return sorted({a[4][0] for a in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET)})
 
 
+def public_network(ip):
+    """Name of the network ip is on (any connected one for 0.0.0.0) when Windows marks it Public, else None.
+    Also None when Windows can't say: loopback, a network still being identified, or PowerShell failing."""
+    if os.name != "nt" or ipaddress.IPv4Address(ip).is_loopback:
+        return None
+    profiles = "Get-NetConnectionProfile" if ip == "0.0.0.0" else f"Get-NetIPAddress -IPAddress {ip} | Get-NetConnectionProfile"
+    try:  # ip is a parsed IPv4 address, safe inside the command
+        out = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                              "[Console]::OutputEncoding = [Text.Encoding]::UTF8; "
+                              f"{profiles} | Where-Object NetworkCategory -eq Public | ForEach-Object Name"],
+                             capture_output=True, encoding="utf-8", errors="replace", timeout=15,
+                             creationflags=subprocess.CREATE_NO_WINDOW).stdout  # no console flashing up
+    except (OSError, subprocess.SubprocessError) as e:
+        log(f"Can't tell whether the network is Public: {e}")
+        return None
+    return next((name.strip() for name in out.splitlines() if name.strip()), None)
+
+
+def guard(rx):
+    """Hidden: look again every 10 s, so it listens once the network is made Private. Listening: every minute, in case
+    this PC moved to a Public network that handed out the same IP."""
+    n = 0
+    while True:
+        time.sleep(10)
+        n += 1
+        if rx.state == "HIDDEN":
+            if not public_network(primary_ip() if rx.ip == "auto" else rx.ip):
+                rx.start()
+        elif rx.thread and n % 6 == 0 and public_network(rx.host):
+            rx.start()  # hides
+
+
 def wasapi():
     return next(h for h in sd.query_hostapis() if "WASAPI" in h["name"])
 
@@ -733,7 +793,8 @@ def watch(rx):
     print()
 
 
-TRAY_COLORS = {"STOPPED": (128, 128, 128), "LISTENING": (230, 150, 0), "CONNECTED": (40, 170, 70)}
+TRAY_COLORS = {"STOPPED": (128, 128, 128), "LISTENING": (230, 150, 0), "CONNECTED": (40, 170, 70),
+               "HIDDEN": (200, 55, 45)}
 
 
 def tray_image(color):
@@ -768,7 +829,7 @@ def tray(rx, saved, screen):
         os._exit(0)  # the main thread is blocked in input(), nothing else wakes it
 
     def toggle():
-        if rx.thread:
+        if rx.active:
             rx.stop()
         else:
             rx.start()
@@ -800,10 +861,14 @@ def tray(rx, saved, screen):
                 if rx.state == "LISTENING" and rx.address != told:  # the window may be closed, this always shows
                     told = rx.address
                     icon.notify(f"Scan the QR code in the Mirror window, or enter {rx.address} in the phone app", "Mirror")
+                elif rx.state == "HIDDEN" and rx.where != told:
+                    told = rx.where
+                    icon.notify(f"Hidden: Windows marks {rx.where} a Public network. If it is your own Wi-Fi or "
+                                "hotspot, make it Private in Settings > Network & internet", "Mirror")
 
     # default=True: a left click on the icon runs the toggle
     icon = pystray.Icon("android-mic", images["STOPPED"], "Mirror", pystray.Menu(
-        pystray.MenuItem("Active", toggle, checked=lambda _item: rx.thread is not None, default=True),
+        pystray.MenuItem("Active", toggle, checked=lambda _item: rx.active, default=True),
         pystray.MenuItem("Show window", lambda: screen.show(), visible=screen is not None),  # QR code or phone
         pystray.MenuItem("Output", pystray.Menu(outputs)),
         pystray.MenuItem("Quit", quit_app),
@@ -838,7 +903,7 @@ def run_command(rx, saved, line):
         setattr(rx, cmd, value)
         saved[cmd] = value
         save_settings(saved)
-        if rx.thread:
+        if rx.active:
             rx.start()
     elif cmd == "devices":
         list_devices(rx.player.device)
@@ -968,6 +1033,18 @@ def selftest():
     thread = rx.thread
     rx.stop()
     assert not thread.is_alive(), "mirror listener did not stop"
+
+    # A network Windows marks Public: nothing listens, the window shows neither the QR code nor the address
+    real = public_network
+    globals()["public_network"] = lambda ip: "Cafe Wi-Fi"
+    try:
+        rx.start()
+        assert rx.state == "HIDDEN" and rx.sock is None and rx.active, (rx.state, rx.sock)
+        assert screen.pair is None and "Cafe Wi-Fi" in screen.waiting and "127.0.0.1" not in screen.waiting
+        rx.stop()
+        assert rx.state == "STOPPED" and not rx.active
+    finally:
+        globals()["public_network"] = real
     print("selftest ok")
 
 
@@ -1034,6 +1111,7 @@ def main():
     rx = Receiver(player, run["mode"], run["ip"], run["port"], screen)
     close_tray = None if args.no_tray else tray(rx, saved, screen)
     rx.start()
+    threading.Thread(target=guard, args=(rx,), daemon=True).start()
     if screen and rx.mode == "tcp" and not args.background:
         screen.show()  # the QR code to pair the phone with
     try:

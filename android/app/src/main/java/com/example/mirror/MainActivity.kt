@@ -131,7 +131,7 @@ class MainActivity : Activity() {
             setPadding(dp(16), dp(14), dp(16), dp(14))
             addView(text(14f, R.color.text, "Belum tersambung juga? Cek:", medium = true))
             for (check in listOf("Mirror di laptop sudah terbuka", "HP dan laptop di Wi-Fi atau hotspot yang sama",
-                "Alamatnya sama dengan judul jendela Mirror")) {
+                "Jaringan itu disetel Private di Windows, bukan Public", "Alamatnya sama dengan judul jendela Mirror")) {
                 val bullet = SpannableString(check).apply { setSpan(BulletSpan(dp(10), getColor(R.color.muted)), 0, length, 0) }
                 addView(text(14f, R.color.muted, bullet), lp(top = 6))
             }

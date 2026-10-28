@@ -34,7 +34,9 @@ Ambil dari halaman [Releases](https://github.com/maulana-reza/android-mic-cli/re
 
 ## Cara menjalankan
 
-1. Sambungkan HP dan laptop ke jaringan yang sama (hotspot HP atau Wi-Fi yang sama).
+1. Sambungkan HP dan laptop ke jaringan yang sama (hotspot HP atau Wi-Fi yang sama). Di Windows, jaringan
+   itu harus **Private**: Settings → Network & internet → Wi-Fi → (nama jaringan) → Network profile type →
+   **Private**. Di jaringan Public, Mirror bersembunyi: tidak menerima HP dan tidak menampilkan kode QR.
 2. Jalankan **Mirror** dari Start menu. Jendela Mirror terbuka dengan kode QR, dan ikon mic muncul di
    tray. Judul jendela berisi alamat laptop, misalnya `192.168.43.20:54345`.
 3. Di app Mirror di HP, tap **Scan QR di laptop** lalu arahkan kamera ke kode QR. Bisa juga ketik
@@ -78,6 +80,7 @@ Warna ikon menunjukkan status:
 - abu-abu = `STOPPED`
 - oranye = `LISTENING`, menunggu HP connect
 - hijau = `CONNECTED`
+- merah = `HIDDEN`, jaringan Public: tidak menerima HP sampai jaringannya dijadikan Private, lalu mulai sendiri
 
 **Klik kiri** ikon untuk menyalakan/mematikan listener. Klik kanan untuk membuka menu:
 
@@ -154,8 +157,9 @@ Diukur dengan itel S666LN di Wi-Fi rumah dan laptop 14 core:
 
 ## Catatan
 
-- **Keamanan:** koneksi HP ke laptop tidak dienkripsi. Pakai di hotspot HP atau Wi-Fi rumah, jangan
-  di Wi-Fi publik.
+- **Keamanan:** koneksi HP ke laptop tidak dienkripsi dan tanpa password, jadi siapa pun di jaringan yang sama
+  bisa ikut menyambung. Karena itu Mirror hanya menerima HP di jaringan yang di Windows disetel Private.
+  Jadikan Private hanya jaringan yang kamu percaya (Wi-Fi rumah, hotspot sendiri), jangan Wi-Fi publik.
 - IP hotspot bisa berubah tiap hotspot dinyalakan ulang. Kalau muncul `This PC's IP changed`, matikan
   lalu nyalakan lagi **Active** di tray (atau ketik `start`). Di HP tap **Batal**, lalu scan ulang kode QR.
 - App Mirror di HP menyambung ulang sendiri kalau koneksi putus, jadi izin rekam layar tidak perlu diulang.

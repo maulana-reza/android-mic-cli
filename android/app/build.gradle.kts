@@ -14,8 +14,8 @@ android {
         applicationId = "io.github.maulanareza.mirror"
         minSdk = 26
         targetSdk = 36
-        versionCode = 4
-        versionName = "0.4.0"
+        versionCode = 5
+        versionName = "0.4.1"
     }
 
     // standard: screen and mic, installs like any app. control: also replays the PC's clicks and keys
